@@ -1,0 +1,643 @@
+---
+title: |
+  | STAT 37400
+  | Data Analysis Project - Appendix
+  | <i>Prediction of AirBnb's Rental Prices </i>
+  | \vspace{0.5cm}
+author: "Zhi Rong Tan"
+date: "November 28 2018"
+fontsize: 11pt
+
+output:
+  pdf_document: default
+  word_document: default
+fig_crop: false
+geometry: margin=0.75in
+---
+
+```{r setup, include=FALSE}
+library(MASS)
+library(glmnet)
+library(quantreg)
+library(faraway)
+library(GGally)
+library(openintro)
+library(mosaic)
+library(knitr)
+library(tidyverse)
+library(ggformula)
+library(gridExtra)
+library(broom)
+require(maps)
+require(ggmap)
+library(raster)
+library(sp)
+library(maptools)
+library(mapdata)
+library(geosphere)
+library(maps)
+library(ggplot2)
+library(dplyr)
+library(RColorBrewer)
+library(akima)
+require(lattice)
+library(fields)
+library(locfit)
+library(gam)
+
+options(width=70, digits=4, scipen=8)
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  x <- def.chunk.hook(x, options)
+  ifelse(options$size != "normalsize", paste0("\\", options$size,"\n\n", x, "\n\n \\normalsize"), x)
+})
+opts_chunk$set(size='small') # We set the default R output size a bit smaller
+opts_chunk$set(echo=TRUE)
+```
+
+#Data Processing
+```{r eval=FALSE}
+data.raw = read.csv("listing.csv", header=T)
+#Remove the ID row
+airbnb1 = data.raw[,-c(1,2)]
+
+#PRICES
+#Remove observations with price=$0
+airbnb1$price[airbnb1$price==0] <- NA
+airbnb2 = filter(airbnb1, !is.na(price))
+
+#Remove observations with price > $1000
+airbnb2$price[airbnb2$price > 1000] <- NA
+airbnb = filter(airbnb2, !is.na(price))
+hist(airbnb$price, breaks=50, main="Airbnb Prices", 
+     xlab="Price", ylab="Frequency", col="light blue")
+
+#Include a Log(Price) variable, just in case
+airbnb$price.log = log(airbnb$price)
+hist(airbnb$price.log, breaks=50, main="Airbnb Log Prices", 
+     xlab="Log Price", ylab="Frequency", col="light yellow")
+
+
+#BEDROOMS and No. OF PEOPLE
+hist(airbnb$people, main="People Allowed", xlab="No. of People", col="grey")
+#Introduce new variable, no. of people per bedroom
+airbnb$room.den = airbnb$people/airbnb$rooms
+index1 = airbnb$room.den == Inf
+airbnb$room.den[index1] <- airbnb$people[index1]
+
+#NUMBER OF REVIEWS
+#Change no. of reviews into ordinal variables
+airbnb$review.size <- case_when(airbnb$review.num <= 5 ~ "0",
+                  between(airbnb$review.num, 6, 20) ~ '1',
+                  between(airbnb$review.num, 21, 50) ~ '2',
+                  between(airbnb$review.num, 51, 100) ~ '3',
+                  airbnb$review.num > 100 ~ '4'
+                  )
+airbnb$review.size <- as.numeric(airbnb$review.size)
+
+
+#Dealing with RATING variable
+#Only consider scores 60 and above, otherwise 0
+airbnb$ratings = airbnb$ratings.old - 60
+index1 <- airbnb$ratings < 0
+index2 <- is.na(airbnb$ratings.old)
+airbnb$ratings[index1] <- 0
+airbnb$ratings[index2] <- 0
+#For the original ratings, fill in missing data with mean
+airbnb$ratings.old[index2] <- mean(airbnb$ratings.old, na.rm=T)
+hist(airbnb$ratings.old, breaks=50, main="Rating Density", xlab="Ratings", col="orange")
+
+#Investigate the correlation matrix
+round(cor(airbnb), 3)
+
+=========================================================================
+
+#DENSITY ESTIMATION
+#Check out the plot of latitude/longitude against price
+plot( airbnb$latitude, airbnb$price.log)
+plot( airbnb$longitude, airbnb$price.log)
+
+#First get the map
+chi_bb <- c(left = -87.8, bottom = 41.7,
+            right = -87.5, top = 42.05)
+chicago <- get_stamenmap(bbox = chi_bb, zoom = 11)
+
+ggmap(chicago) +
+  stat_density_2d(data = airbnb,
+                  aes(x = longitude,
+                      y = latitude,
+                      fill = stat(level)),
+                  alpha = .3,
+                  bins = 25,
+                  geom = "polygon") +
+  scale_fill_gradientn(colors = brewer.pal(9, "Spectral"))
+
+```
+
+#Parametric Regression
+```{r eval=FALSE}
+#First split into training and test set.
+set.seed(71)
+sample = sample(nrow(airbnb), size=(3/4)*nrow(airbnb), replace=F)
+train.set = airbnb[sample,]
+test.set = airbnb[-sample,]
+
+#MSE Functions
+mse.function <- function (actual,pred) {
+sqrt(mean((actual - pred)^2))
+}
+mse.log <- function(actual, pred.log) {
+sqrt(mean((actual - exp(pred.log))^2))
+}
+
+=========================================================================
+
+#First, we regress with full model with Price on all variables
+#FULL MODEL
+full1 = lm(price ~ latitude + longitude + people + rooms + review.num
++ ratings.old + superhost + no.private + living
++ room.den + review.size + ratings,
+data=train.set)
+
+#Fix at 5% significance level. Perform backward Stepwise regression
+stepwise <- step(full1, data=train.data, direction="backward")
+summary(stepwise)
+
+#Continue with final stepwise to remove ratings
+full2 = lm(price ~ latitude + longitude + people + rooms + ratings.old +
+             no.private + living + room.den + review.size, data=train.set)
+summary(full2)
+
+#EVALUATION
+#MSE for this model
+predict.valid1 <- predict(full2, newdata=test.set)
+risk.1 <- mse.function(test.set$price, predict.valid1)
+risk.1
+plot(train.set$latitude, full2$residuals, cex=0.5, main="Model 1",
+     xlab="Latitude", ylab="Residuals")
+plot(train.set$longitude, full2$residuals, cex=0.5, main="Model 1",
+     xlab="Longitude", ylab="Residuals")
+plot(full2$fitted.values, full2$residuals, cex=0.5, main="Model 1",
+     xlab="Fitted Values", ylab="Residuals")
+
+=========================================================================
+
+#Next, we regress with full model with Price on all polynomial lat + long
+#FULL MODEL
+full.poly1 = lm(price ~ latitude + I(latitude^2) + longitude + I(latitude^2) +
+          people + rooms + review.num + ratings.old + superhost + 
+          no.private + living + room.den + review.size + ratings,
+          data=train.set)
+
+#Fix at 5% significance level. Perform backward Stepwise regression
+stepwise <- step(full.poly1, data=train.data, direction="backward")
+summary(stepwise)
+
+#Continue with final stepwise to remove ratings
+full.poly2 = lm(price ~ latitude + I(latitude^2) + longitude +
+          people + rooms + ratings.old + living + room.den + review.size,
+          data=train.set)
+summary(full.poly2)
+
+#EVALUATION
+#MSE for this model
+valid.poly2 <- predict(full.poly2, newdata=test.set)
+risk.poly <- mse.function(test.set$price, valid.poly2)
+risk.poly
+
+=========================================================================
+
+#NEXT, CONSIDER IF using LOG(PRICE) will give a better result.
+full.log1 = lm(price.log ~ latitude + I(latitude^2) + longitude + I(latitude^2) +
+          people + rooms + review.num + ratings.old + superhost + 
+          no.private + living + room.den + review.size + ratings,
+          data=train.set)
+
+#Fix at 5% significance level. Perform backward Stepwise regression
+stepwise <- step(full.log1, data=train.data, direction="backward")
+summary(stepwise)
+
+#Continue with final stepwise to remove ratings
+full.log2 = lm(price.log ~ latitude + I(latitude^2) + longitude +
+          people + rooms + ratings.old + no.private +
+          living + review.size, data=train.set)
+summary(full.log2)
+
+#MSE for this model
+predict.valid2 <- predict(full.log2, newdata=test.set)
+risk.2 <- mse.log(test.set$price, predict.valid2)
+risk.2
+
+plot(train.set$latitude, exp(full.log2$fitted.values), cex=0.5, xlab="Latitude", 
+     ylab="Price", main="Fitted Values of Price with Log(Price) as response")
+plot(train.set$longitude, exp(full.log2$fitted.values), cex=0.5, xlab="Longitude", 
+     ylab="Price", main="Fitted Values of Price with Log(Price) as response")
+
+plot(train.set$latitude, full.log2$residuals, main="Residuals vs. Latitude", 
+     xlab="Latitude", ylab="Residuals", cex=0.5)
+plot(train.set$longitude, full.log2$residuals, main="Residuals vs. Longitude", 
+     xlab="Longitude", ylab="Residuals", cex=0.5)
+plot(full.log2$fitted.values, full.log2$residuals, main="Residuals vs. Fitted Values", 
+     xlab="Fitted", ylab="Residuals", cex=0.5)
+
+=========================================================================
+
+#Next, we want to consider case when we ignore the location variable.
+
+#Response is price.log
+full.prep1a = lm(price.log ~ people + rooms + review.num
++ ratings.old + superhost + no.private + living
++ room.den + review.size + ratings, data=train.set)
+
+#Fix at 5% significance level. Perform backward Stepwise regression
+stepwise <- step(full.prep1a, data=train.data, direction="backward")
+summary(stepwise)
+
+#Continue with final stepwise to remove ratings
+full.prep1 = lm(price.log ~ people + rooms + ratings.old +
+             no.private + living + review.size, data=train.set)
+summary(full.prep1)
+
+predict.prep1 <- predict(full.prep1, newdata=test.set)
+risk.3 <- mse.log(test.set$price, predict.prep1)
+risk.3
+
+#Response is price, not price.log
+full.prep2a = lm(price ~ people + rooms + review.num
++ ratings.old + superhost + no.private + living
++ room.den + review.size + ratings, data=train.set)
+stepwise <- step(full.prep2a, data=train.data, direction="backward")
+summary(stepwise)
+
+full.prep2 = lm(price ~ people + ratings.old +
+             no.private + living + room.den + review.size, data=train.set)
+summary(full.prep2)
+
+predict.prep2 <- predict(full.prep2, newdata=test.set)
+risk.4 <- mse.function(test.set$price, predict.prep2)
+risk.4
+
+```
+
+#Nonparametric Regression
+###Local Linear Regression Functions
+```{r}
+#First, let us define our Local Linear Regression functions
+#Write 2-variable functions for Gaussian Kernel
+gaussian.fn <- function (x, y, xa, ya, h) {
+  x.new = sqrt((x- xa)^2 + (y-ya)^2)
+  1/(2*pi)*exp((-1/2)*((x.new/h)^2))
+}
+
+L_ii <- function (x, y, xi, yi, h, response) {
+  estimate1 <- gaussian.fn(x,y,xi,yi,h)
+  estimate2 <- estimate1/sum(estimate1)
+  estimate2*response
+}
+
+loocv.score = function(xi, yi, response, h.vector) {
+  length.x = length(xi)
+  matrix1 <- matrix(nrow = length.x, ncol = length.x)
+  count = NULL
+  #Find the values of kernels in the estimator function
+  for (i in 1:length.x) {
+    for (j in 1:length.x) {
+      matrix1[i,j] <- (xi[i]-xi[j])^2 + (yi[i]-yi[j])^2
+    }
+  }
+  for (h in h.vector) {
+    matrix2 <- apply(matrix1, c(0,1), 
+                     function(x)(1/(2*pi))*exp((-1/2)*x*(1/h^2)))
+    matrix3 <- matrix2/rowSums(matrix2)
+    Li <- diag(matrix3)
+    pred <- matrix3 %*% response
+    result <- sum((( pred-response)/(1-Li))^2)
+    count <- c(count, result)
+  }
+  return (count)
+}
+
+#Function to find actual estimator function
+kernel.estimate <- function(xi, yi, x, y, h, response) {
+  response[is.na(response)] <-0
+  length.xseq = length(x)
+  length.yseq = length(y)
+  pred.matrix <- matrix(0, length.xseq, length.yseq)
+  for (i in 1:length.xseq) {
+    for (j in 1:length.yseq) {
+      temppred <- gaussian.fn(x[i], y[j], xi, yi, h)
+      temppred <- temppred/sum(temppred)
+      temppred[is.na(temppred)] <- 0
+      pred <- sum(temppred*response)
+      pred.matrix[i,j] <- pred
+    }
+  }
+  pred.matrix
+}
+
+#Function to do final prediction
+llr.predict <- function(xi, yi, xtest, ytest, h, response) {
+  response[is.na(response)] <-0
+  length.xseq = length(xtest)
+  pred.list = NULL
+  for (i in 1:length.xseq) {
+    temppred <- gaussian.fn(xtest[i], ytest[i], xi, yi, h)
+    temppred <- temppred/sum(temppred)
+    pred.val <- sum(temppred*response)
+    pred.list = c(pred.list, pred.val)
+  }
+  pred.list
+}
+
+
+```
+
+
+###Price ~ Location
+
+```{r eval=FALSE}
+#Setting up data
+set.seed(71)
+sample = sample(nrow(airbnb), size=(3/4)*nrow(airbnb), replace=F)
+train.set2 = airbnb[sample,]
+test.set2 = airbnb[-sample,]
+
+#Rough gauge of how the Log(price) density looks
+im <- with(train.set2, interp(longitude,latitude,price.log))
+levelplot(im$z, main="3D Plot of Log(Price) - Density in Chicago", 
+          xlab="Longitude", ylab="Latitude", contour=F)
+
+#First experiment with local linear regression on price (Not residual) to make sure
+#the method works.
+long.seq = seq(-87.8, -87.5, 0.003)
+lat.seq = seq(41.7, 42.05, 0.003)
+
+grid.mat = (seq(0.0005, 0.015,length=50))
+risk.score <- loocv.score(train.set2$longitude, train.set2$latitude,
+                          train.set2$price, grid.mat)
+optband <- grid.mat[which.min(risk.score)]
+optband
+
+final.result.price <- kernel.estimate(train.set2$longitude, train.set2$latitude, 
+                                long.seq, lat.seq, 
+                                optband, train.set2$price)
+
+image.plot(long.seq, lat.seq, final.result.price, 
+           col=rainbow(128, alpha=.5), main="Local Linear Regression on Price",
+           xlab="Longitude", ylab="Latitude")
+US(add=T, lwd=2, col=1)
+
+```
+
+
+###Residuals of Log(Price) ~ Location (1-Dim)
+```{r eval=FALSE}
+#Do REGRESSION FOR RESIDUALS ON LOCATION VARIABLE NONPARAMETRICALLY, 
+#In Log(Price) Scale
+
+#Because a huge amount of rentals were concentrated in a few locations, we've chosen
+#to divide the map into grids, rounding up to nearest 0.0025, then find the mean residual in
+#each grid
+
+pred.train.prep.log <- predict(full.prep1, newdata=train.set2)
+train.set2$residual <- train.set2$price.log - pred.train.prep.log
+pred.test.prep.log <- predict(full.prep1, newdata=test.set2)
+test.set2$residual <- test.set2$price.log - pred.test.prep.log
+
+train.set2$latitude = 0.0025*round(train.set2$latitude/0.0025)
+train.set2$longitude = 0.0025*round(train.set2$longitude/0.0025)
+
+train.mean1 <- aggregate(train.set2$residual,
+                         by=list(train.set2$latitude, train.set2$longitude), mean)
+colnames(train.mean1) = c("latitude","longitude", "residual")
+
+plot(train.mean1$latitude, train.mean1$residual, cex=0.5)
+plot(train.mean1$longitude, train.mean1$residual, cex=0.5)
+
+#First, let us check out the 1-dimensional local linear regression on both
+#longitude and #latitude
+
+#Create the set of bandwidths.
+#LONGITUDE
+grid.mat = (seq(0.001, 0.1,length=50))
+cvscore.mat = rep(0, 50)
+library(locfit)
+for (i in 1:50) {
+  test.h <- grid.mat[i]
+  testlocfit = locfit(residual ~ longitude, data=train.mean1,
+                      alpha=c(0,test.h),kern="gauss", deg=1, ev=dat())
+  r <- residuals(testlocfit)
+  l_ii <- fitted(testlocfit, what="infl")
+  riskscore = mean((r/(1 - l_ii))^2)
+  cvscore.mat[i] <- riskscore
+}
+optband1 = grid.mat[which.min(cvscore.mat)]
+#Fit the LOCAL LINEAR REGRESSION model.
+locfit.opt1 = locfit(residual ~ longitude, data=train.mean1,
+                     alpha=c(0,optband1), kern="gauss", deg=1, maxk = 10000)
+new.long = predict(locfit.opt1, newdata=train.mean1$longitude)
+#Find the CONFIDENCE INTERVAL.
+normell = predict(locfit.opt1, where="data", what="vari")
+nu = as.numeric(locfit.opt1$dp[6])
+nutilde = as.numeric(locfit.opt1$dp[7])
+sigmasqrhat = sum(residuals(locfit.opt1)^2)/(2033-2*nu+nutilde)
+critval = kappa0(locfit.opt1)$crit.val
+ci1 = 1.96*sqrt(sigmasqrhat*normell)
+#Plot the optimal bandwidth fit, the Confidence Interval, and the actual function r(x).
+plot(train.mean1$longitude, train.mean1$residual, type="p", cex=0.3,
+     main="Longitude Local Linear Regression", xlab="Longitude", ylab="Log(Price) Residual (Predicted)")
+lines(train.mean1$longitude, new.long, lwd=2, col=2)
+lines(train.mean1$longitude, new.long - ci1*2, col=3, lwd=2)
+lines(train.mean1$longitude, new.long + ci1*2, col=4, lwd=2)
+
+#LATITUDE
+grid.mat = (seq(0.001, 0.1,length=50))
+cvscore.mat = rep(0, 50)
+library(locfit)
+for (i in 1:50) {
+  test.h <- grid.mat[i]
+  testlocfit = locfit(residual ~ latitude, data=train.mean1,
+                      alpha=c(0,test.h),kern="gauss", deg=1, ev=dat())
+  r <- residuals(testlocfit)
+  l_ii <- fitted(testlocfit, what="infl")
+  riskscore = mean((r/(1 - l_ii))^2)
+  cvscore.mat[i] <- riskscore
+}
+optband1 = grid.mat[which.min(cvscore.mat)]
+#Fit the LOCAL LINEAR REGRESSION model.
+locfit.opt2 = locfit(residual ~ latitude, data=train.mean1,
+                     alpha=c(0,optband1), kern="gauss", deg=1, maxk = 10000)
+new.long2 = predict(locfit.opt2, newdata=train.mean1$latitude)
+#Find the CONFIDENCE INTERVAL.
+normell = predict(locfit.opt2, where="data", what="vari")
+nu = as.numeric(locfit.opt2$dp[6])
+nutilde = as.numeric(locfit.opt2$dp[7])
+sigmasqrhat = sum(residuals(locfit.opt2)^2)/(2033-2*nu+nutilde)
+critval = kappa0(locfit.opt2)$crit.val
+ci1 = 1.96*sqrt(sigmasqrhat*normell)
+#Plot the optimal bandwidth fit, the Confidence Interval, and the actual function r(x).
+lat.plot <- train.mean1$latitude
+plot(lat.plot[order(lat.plot)], train.mean1$residual, type="p", cex=0.3,
+     main="Latitude Local Linear Regression", xlab="Latitude", ylab="Log(Price) Residual (Predicted)")
+lines(lat.plot[order(lat.plot)], new.long2[order(lat.plot)], lwd=2, col=2)
+lines(lat.plot[order(lat.plot)], new.long2[order(lat.plot)] - ci1*2, col=3, lwd=2)
+lines(lat.plot[order(lat.plot)], new.long2[order(lat.plot)] + ci1*2, col=4, lwd=2)
+
+```
+
+###Residuals of Log(Price) ~ Location (2-Dim)
+```{r eval=FALSE}
+set.seed(71)
+sample = sample(nrow(airbnb), size=(3/4)*nrow(airbnb), replace=F)
+train.set2 = airbnb[sample,]
+test.set2 = airbnb[-sample,]
+
+pred.train.prep.log <- predict(full.prep1, newdata=train.set2)
+train.set2$residual <- train.set2$price.log - pred.train.prep.log
+pred.test.prep.log <- predict(full.prep1, newdata=test.set2)
+test.set2$residual <- test.set2$price.log - pred.test.prep.log
+
+#Create the set of bandwidths.
+grid.mat = (seq(0.0005, 0.010,length=50))
+risk.score <- loocv.score(train.mean1$longitude, train.mean1$latitude,
+                          train.mean1$residual, grid.mat)
+plot(grid.mat, risk.score, type = 'l', xlab="Bandwith", ylab = "Risk Score",
+     main="LOOCV Score Curve (Regression on Log(Price))", lwd=2, col="red")
+optband <- grid.mat[which.min(risk.score)]
+
+#Find the estimation of the grid points.
+long.seq = seq(-87.8, -87.5, 0.003)
+lat.seq = seq(41.7, 42.05, 0.003)
+final.result.res1 <- kernel.estimate(train.mean1$longitude, train.mean1$latitude, 
+                                long.seq, lat.seq, 
+                                optband, train.mean1$residual)
+#Make results in plot more obvious
+for (i in 1:length(long.seq)) { for (j in 1:length(lat.seq)) {
+    if (final.result.res1[i,j] > 1) {
+      final.result.res1[i,j] <- 0 } } }
+image.plot(long.seq, lat.seq, final.result.res1, col=rainbow(128, alpha=.5),
+           main="Local Linear Regression on Residuals (Log Price)",
+           xlab="Longitude", ylab="Latitude")
+US(add=T, lwd=2, col=1)
+
+#Make plot on Google Maps
+library(reshape2)
+colnames(final.result.res1) = lat.seq
+rownames(final.result.res1) = long.seq
+result <- melt(final.result.res1)
+names(result)[1] <- "long"
+names(result)[2] <- "lat"
+names(result)[3] <- "freq"
+
+ggmap(chicago) + geom_tile(data = result,
+                                  aes(x = long, y = lat, alpha = freq),fill = 'red')+
+  theme(axis.title.y =element_blank(),axis.title.x=element_blank()
+        + scale_alpha(range = c(.6, .75), guide = FALSE))
+
+
+#Now, estimate the results of the test set
+test.set.result.1 <- llr.predict(train.set2$longitude, train.set2$latitude, 
+                                test.set2$longitude, test.set2$latitude, 
+                                optband, train.set2$residual)
+test.set.predict.1 = test.set.result.1 + pred.test.prep.log
+test.set2$predict <- exp(test.set.predict.1)
+
+mse.log(test.set2$price, test.set.predict.1)
+
+```
+
+###Residuals of Regular Price ~ Location (2-Dim)
+```{r eval=FALSE}
+#Do REGRESSION FOR RESIDUALS ON LOCATION VARIABLE NONPARAMETRICALLY, 
+#In Price Scale
+set.seed(71)
+sample = sample(nrow(airbnb), size=(3/4)*nrow(airbnb), replace=F)
+train.set2 = airbnb[sample,]
+test.set2 = airbnb[-sample,]
+
+pred.train.prep2 <- predict(full.prep2, newdata=train.set2)
+train.set2$residual.b <- train.set2$price - pred.train.prep2
+pred.test.prep2 <- predict(full.prep2, newdata=test.set2)
+test.set2$residual.b <- test.set2$price - pred.test.prep2
+
+train.set2$latitude = 0.0025*round(train.set2$latitude/0.0025)
+train.set2$longitude = 0.0025*round(train.set2$longitude/0.0025)
+
+train.mean2 <- aggregate(train.set2$residual.b,
+                         by=list(train.set2$latitude, train.set2$longitude), mean)
+colnames(train.mean2) = c("latitude","longitude", "residual")
+
+grid.mat = (seq(0.0005, 0.015,length=50))
+risk.score <- loocv.score(train.mean2$longitude, train.mean2$latitude,
+                          train.mean2$residual, grid.mat)
+plot(grid.mat, risk.score, type = 'l', xlab="Bandwith", ylab = "Risk Score",
+     main="LOOCV Score Curve (Regression on Price)")
+optband2 <- grid.mat[which.min(risk.score)]
+
+#Find the estimation of the grid points.
+long.seq = seq(-87.8, -87.5, 0.003)
+lat.seq = seq(41.7, 42.05, 0.003)
+final.result.2 <- kernel.estimate(train.mean2$longitude, train.mean2$latitude, 
+                                long.seq, lat.seq, 
+                                optband2, train.mean2$residual)
+#Make results in plot more obvious
+for (i in 1:length(long.seq)) { for (j in 1:length(lat.seq)) {
+    if (final.result.2[i,j] > 100) {
+      final.result.2[i,j] <- 0 } } }
+image.plot(long.seq, lat.seq, final.result.2, col=rainbow(128, alpha=.5),
+           main="Local Linear Regression on Residuals (Regular Price)",
+           xlab="Longitude", ylab="Latitude")
+US(add=T, lwd=2, col=1)
+
+#Make plot on Google Maps
+library(reshape2)
+colnames(final.result.2) = lat.seq
+rownames(final.result.2) = long.seq
+result.b <- melt(final.result.2)
+names(result.b)[1] <- "Longitude"
+names(result.b)[2] <- "Latitude"
+names(result.b)[3] <- "Prices"
+# result2 <- subset(result.b, freq < 0)
+
+ggmap(chicago) + geom_tile(data = result.b,
+                                  aes(x = Longitude, y = Latitude, 
+                                      alpha = Prices),fill = 'orange') +
+  theme(axis.title.y =element_blank(),axis.title.x=element_blank()
+        + scale_alpha(range = c(.6, .75), guide = FALSE))
+
+#Prediction
+test.set.result.2 <- llr.predict(train.set2$longitude, train.set2$latitude, 
+                                test.set2$longitude, test.set2$latitude, 
+                                optband2, train.set2$residual)
+test.set.predict.2 = test.set.result.2 + pred.test.prep2
+mse.function(test.set2$price, test.set.predict.2)
+
+```
+
+#Additive Model
+```{r eval=FALSE}
+set.seed(71)
+sample = sample(nrow(airbnb), size=(3/4)*nrow(airbnb), replace=F)
+train.set2 = airbnb[sample,]
+test.set2 = airbnb[-sample,]
+
+#S(.) only for numerical variables
+gamfit <-gam(price.log ~ s(people) + s(rooms) + s(ratings.old) + s(review.size) + s(longitude) 
+             + s(latitude) + no.private + living, data= train.set2)
+summary(gamfit)
+
+predict.am <- predict(gamfit, newdata = test.set2)
+risk.am <- mse.log(test.set2$price, predict.am)
+risk.am
+```
+
+#Answer question to predict my own apartment's rental prices
+```{r eval=FALSE}
+question = read.csv("question.csv", header=T)
+question.prep.log <- predict(full.prep1, newdata=question)
+question.residual <- llr.predict(train.set2$longitude, train.set2$latitude, 
+                                question$longitude, question$latitude, 
+                                optband, train.set2$residual)
+test.set.predict.1 = exp(question.prep.log + question.residual)
+```
+

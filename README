@@ -1,0 +1,5 @@
+DATA
+1. original_distribute.mat: Original MNIST data set with 50K/10K/10K train/dev/test samples. All pixels are normalized to [0, 1].
+2. noisy_distribute.mat: The data set is generated from original_distribute.mat by randomly rotating each digit at a uniformly sampled angle. There are also 50K/10K/10K train/dev/test samples.
+3. noisy_two_view_distribute.mat: The data set consists of two views. One view is the randomly rotated samples from noisy_distribute.mat, while the other view is also generated from original_distribute.mat, by adding independent random noise to each pixel. The noise is uniformly sampled from [0,1]. All pixels are truncated to [0,1] if necessary.
+4. idx.mat: This file contains two arrays of indexes of training data in noisy MNIST. It will be used in the question 4 of PCA and CCA section. Use scipy.io.loadmat for loading.

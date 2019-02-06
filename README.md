@@ -1,2 +1,2 @@
-# STAT 374
-Contains all the code for nonparametric
+# Class
+Contains all the code for classes
